@@ -6,18 +6,8 @@ import { memoryStore } from '@/lib/store';
 export const dynamic = 'force-dynamic';
 
 export default async function HomePage() {
-  const cookieStore = cookies();
-  let conversationId = cookieStore.get('conversationId')?.value;
-  if (!conversationId) {
-    conversationId = randomUUID();
-    cookieStore.set('conversationId', conversationId, {
-      httpOnly: false,
-      sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
-      path: '/',
-      maxAge: 60 * 60 * 24 * 30
-    });
-  }
+  const conversationIdFromCookie = cookies().get('conversationId')?.value;
+  const conversationId = conversationIdFromCookie ?? randomUUID();
 
   const ensuredConversation = memoryStore.ensureConversation(conversationId);
   const initialMessages = memoryStore.getMessages(ensuredConversation);
