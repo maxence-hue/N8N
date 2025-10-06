@@ -1,0 +1,1654 @@
+{
+  "name": "ADSolar — Orchestrateur IA Chat & Chantier",
+  "settings": {},
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "adsolar-chat-in",
+        "responseMode": "responseNode"
+      },
+      "id": "Webhook_In",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        -960,
+        0
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Verify ADSolar webhook signature using shared secret\\nconst crypto = require('crypto');\\nconst payload = JSON.stringify($json.body ?? {});\\nconst headers = $json.headers ?? {};\\nconst provided = String(headers['x-adsolar-signature'] || headers['X-ADSolar-Signature'] || '').trim();\\nconst secret = String($env.SHARED_SECRET || '');\\nlet signatureValid = false;\\nif (secret && provided && payload) {\\n  const computed = crypto.createHmac('sha256', secret).update(payload).digest('hex');\\n  try {\\n    signatureValid = crypto.timingSafeEqual(Buffer.from(computed, 'utf8'), Buffer.from(provided.toLowerCase(), 'utf8'));\\n  } catch (error) {\\n    signatureValid = false;\\n  }\\n}\\nreturn [{ json: { body: $json.body ?? {}, headers, signatureValid } }];"
+      },
+      "id": "Function_Verify_HMAC",
+      "name": "Verify HMAC",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        -720,
+        0
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.signatureValid}}"
+            }
+          ]
+        }
+      },
+      "id": "IF_Signature",
+      "name": "Signature valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -500,
+        0
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "responseMode": "onReceived",
+        "responseCode": 401,
+        "responseData": "json",
+        "responseBody": "={\\\"message\\\":\\\"Signature invalide\\\"}"
+      },
+      "id": "Respond_Unauthorized",
+      "name": "Respond Unauthorized",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        -300,
+        -220
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "complete",
+        "model": "gpt-4o-mini",
+        "prompt": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "Tu es l'agent IA de normalisation des conversations ADSolar. Rends uniquement du JSON strict avec: conversationId, clientName, clientEmail, clientAddress, typeInstallation, devisUrl, fichiers, messages (array role/content/type), clientCompany, summary, requestedActions."
+            },
+            {
+              "role": "user",
+              "content": "={{JSON.stringify($json.body || {})}}"
+            }
+          ]
+        },
+        "simplifyOutput": true
+      },
+      "id": "AI_Normalize",
+      "name": "Normalize conversation (AI)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        120
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parse AI normalization output and merge with original payload\\nconst aiMessage = $json.message?.content ?? $json.message ?? '';\\nlet parsed = {};\\ntry {\\n  parsed = JSON.parse(aiMessage);\\n} catch (error) {\\n  parsed = { messages: [] };\\n}\\nconst source = $node['Verify HMAC'].json;\\nreturn [{ json: {\\n  rawBody: source.body || {},\\n  headers: source.headers || {},\\n  conversationId: parsed.conversationId || source.body?.conversationId || '',\\n  clientName: parsed.clientName || source.body?.client?.name || '',\\n  clientEmail: parsed.clientEmail || source.body?.client?.email || '',\\n  clientAddress: parsed.clientAddress || source.body?.client?.address || '',\\n  typeInstallation: parsed.typeInstallation || source.body?.typeInstallation || '',\\n  devisUrl: parsed.devisUrl || source.body?.devisUrl || '',\\n  fichiers: parsed.fichiers || source.body?.fichiers || [],\\n  normalizedMessages: parsed.messages || [],\\n  aiSummary: parsed.summary || '',\\n  requestedActions: parsed.requestedActions || [],\\n  clientCompany: parsed.clientCompany || '',\\n  metadata: { normalization: aiMessage, receivedAt: new Date().toISOString() }\\n} }];"
+      },
+      "id": "Function_Normalized_Context",
+      "name": "Adopt normalized context",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        -20,
+        120
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "complete",
+        "model": "gpt-4o-mini",
+        "prompt": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "Tu es l'agent d'orchestration ADSolar. À partir des messages normalisés, détermine l'intention (create_project_from_quote, update_stage, add_installation_type, add_product, generate_purchase_list, help). Rends du JSON strict avec intent, confidence (0-1), rationale, stageName, installationType, productName, productQuantity, reminderDate, additionalNotes."
+            },
+            {
+              "role": "user",
+              "content": "={{JSON.stringify({ conversationId: $json.conversationId, messages: $json.normalizedMessages, summary: $json.aiSummary, requestedActions: $json.requestedActions })}}"
+            }
+          ]
+        },
+        "simplifyOutput": true
+      },
+      "id": "AI_Intent",
+      "name": "Detect intent (AI)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        220,
+        120
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parse AI intent decision\\nconst aiMessage = $json.message?.content ?? $json.message ?? '';\\nlet parsed = {};\\ntry {\\n  parsed = JSON.parse(aiMessage);\\n} catch (error) {\\n  parsed = { intent: 'help', confidence: 0 };\\n}\\nreturn [{ json: {\\n  ...$node['Adopt normalized context'].json,\\n  intent: parsed.intent || 'help',\\n  intentConfidence: parsed.confidence ?? 0,\\n  intentRationale: parsed.rationale || '',\\n  stageName: parsed.stageName || '',\\n  installationType: parsed.installationType || '',\\n  productName: parsed.productName || '',\\n  productQuantity: parsed.productQuantity || '',\\n  reminderDate: parsed.reminderDate || '',\\n  additionalNotes: parsed.additionalNotes || '',\\n  metadata: { ...$node['Adopt normalized context'].json.metadata, intentDecision: aiMessage }\\n} }];"
+      },
+      "id": "Function_Intent_Context",
+      "name": "Assemble intent context",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        460,
+        120
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "propertyName": "={{$json.intent}}",
+        "dataType": "string",
+        "rules": [
+          {
+            "value": "create_project_from_quote"
+          },
+          {
+            "value": "update_stage"
+          },
+          {
+            "value": "add_installation_type"
+          },
+          {
+            "value": "add_product"
+          },
+          {
+            "value": "generate_purchase_list"
+          }
+        ]
+      },
+      "id": "Switch_Intent",
+      "name": "Intent",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        700,
+        120
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "complete",
+        "model": "gpt-4o-mini",
+        "prompt": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "Tu es l'agent préparateur de chantier ADSolar. Analyse le contexte et fournis du JSON avec notionProperties (clé=nom propriété -> structure Notion), emailContext (client,typeInstallation,date,devisUrl,conversationId), checklistKeywords (array de mots-clés matériel)."
+            },
+            {
+              "role": "user",
+              "content": "={{JSON.stringify($json)}}"
+            }
+          ]
+        },
+        "simplifyOutput": true
+      },
+      "id": "AI_Project_Planner",
+      "name": "Plan chantier (AI)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        960,
+        -160
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prépare les propriétés Notion et le contexte email\\nconst aiMessage = $json.message?.content ?? $json.message ?? '{}';\\nlet parsed = {};\\ntry { parsed = JSON.parse(aiMessage); } catch (error) { parsed = {}; }\\nconst notionProperties = parsed.notionProperties || {};\\nconst emailContext = parsed.emailContext || {};\\nconst checklistKeywords = parsed.checklistKeywords || [];\\nreturn [{ json: {\\n  ...$node['Assemble intent context'].json,\\n  notionProperties,\\n  emailContext: {\\n    client: emailContext.client || $node['Assemble intent context'].json.clientName || 'Client ADSolar',\\n    typeInstallation: emailContext.typeInstallation || $node['Assemble intent context'].json.typeInstallation || 'Installation solaire',\\n    date: emailContext.date || new Date().toISOString().split('T')[0],\\n    devisUrl: emailContext.devisUrl || $node['Assemble intent context'].json.devisUrl || '',\\n    conversationId: emailContext.conversationId || $node['Assemble intent context'].json.conversationId || ''\\n  },\\n  checklistKeywords\\n} }];"
+      },
+      "id": "Function_Project_Context",
+      "name": "Préparer données chantier",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        -160
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "url": "=https://api.notion.com/v1/databases/{{$env.NOTION_DB_ID}}/query",
+        "method": "POST",
+        "sendHeaders": true,
+        "options": {
+          "response": {
+            "responseFormat": "json"
+          }
+        },
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.NOTION_TOKEN}}"
+            },
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParametersJson": "={{JSON.stringify({ filter: { property: 'Conversation ID', rich_text: { equals: $json.conversationId || '' } } })}}"
+      },
+      "id": "HTTP_Notion_Query",
+      "name": "Rechercher chantier",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        1440,
+        -220
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prépare la requête Notion de création/mise à jour\\nconst search = $json.data || $json.results || $json.notionSearch || $json;\\nconst firstResult = Array.isArray(search?.results) ? search.results[0] : (Array.isArray(search) ? search[0] : undefined);\\nconst properties = $node['Préparer données chantier'].json.notionProperties || {};\\nconst databaseId = $env.NOTION_DB_ID;\\nlet request = {};\\nif (firstResult && firstResult.id) {\\n  request = { method: 'PATCH', url: `https://api.notion.com/v1/pages/${firstResult.id}`, body: { properties } };\\n} else {\\n  request = { method: 'POST', url: 'https://api.notion.com/v1/pages', body: { parent: { database_id: databaseId }, properties } };\\n}\\nreturn [{ json: { ...$node['Préparer données chantier'].json, notionSearch: search, notionRequest: request, notionPageId: firstResult?.id || null } }];"
+      },
+      "id": "Function_Notion_Upsert",
+      "name": "Préparer requête Notion",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1680,
+        -220
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "url": "={{$json.notionRequest.url}}",
+        "method": "={{$json.notionRequest.method}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.NOTION_TOKEN}}"
+            },
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParametersJson": "={{JSON.stringify($json.notionRequest.body)}}",
+        "options": {
+          "response": {
+            "responseFormat": "json"
+          }
+        }
+      },
+      "id": "HTTP_Notion_Upsert",
+      "name": "Enregistrer chantier",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        1920,
+        -220
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Lit le fichier materiel.csv et filtre selon le type d'installation\\nconst fs = require('fs');\\nconst path = require('path');\\nconst context = $node['Préparer données chantier'].json;\\nconst csvPath = path.join(process.cwd(), 'materiel.csv');\\nlet rows = [];\\ntry {\\n  const raw = fs.readFileSync(csvPath, 'utf8');\\n  const lines = raw.split(/\\r?\\n/).filter(Boolean);\\n  const headers = lines.shift()?.split(',') || [];\\n  for (const line of lines) {\\n    const cols = line.split(',');\\n    const record = {};\\n    headers.forEach((header, idx) => { record[header.trim()] = (cols[idx] || '').trim(); });\\n    rows.push(record);\\n  }\\n} catch (error) {\\n  rows = [];\\n}\\nconst normalizedType = (context.typeInstallation || context.emailContext?.typeInstallation || '').toLowerCase();\\nconst filtered = rows.filter(row => (row.TypeInstallation || '').toLowerCase() === normalizedType);\\nconst materialItems = filtered.map(row => ({ produit: row.Produit || '', quantite: row.Quantité || row.Quantite || '1' }));\\nreturn [{ json: { ...context, materialRows: rows, materialItems, materialType: context.typeInstallation || context.emailContext?.typeInstallation || '', notionProperties: context.notionProperties } }];"
+      },
+      "id": "Function_Material_Load",
+      "name": "Charger matériel",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1440,
+        -40
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "complete",
+        "model": "gpt-4o-mini",
+        "prompt": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "Formatte la liste de matériel en texte exploitable. Rends du JSON avec materialText (texte multi-lignes) et highlights (phrases clés)."
+            },
+            {
+              "role": "user",
+              "content": "={{JSON.stringify({ typeInstallation: $json.materialType, items: $json.materialItems })}}"
+            }
+          ]
+        },
+        "simplifyOutput": true
+      },
+      "id": "AI_Material_Formatter",
+      "name": "Formatter matériel (AI)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        1680,
+        -40
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Fusionne la sortie AI matériel avec les propriétés Notion\\nconst aiMessage = $json.message?.content ?? $json.message ?? '{}';\\nlet parsed = {};\\ntry { parsed = JSON.parse(aiMessage); } catch (error) { parsed = {}; }\\nconst materialText = parsed.materialText || ($node['Charger matériel'].json.materialItems || []).map(item => `${item.produit} x${item.quantite}`).join('\\\\n') || 'À définir.';\\nconst highlights = parsed.highlights || [];\\nconst notionProperties = { ...$node['Charger matériel'].json.notionProperties };\\nnotionProperties['Matériel à prévoir'] = { rich_text: [{ text: { content: materialText.slice(0, 2000) } }] };\\nreturn [{ json: { ...$node['Charger matériel'].json, notionProperties, materialText, materialHighlights: highlights } }];"
+      },
+      "id": "Function_Material_Merge",
+      "name": "Fusion matériel",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1920,
+        -40
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "complete",
+        "model": "gpt-4o-mini",
+        "prompt": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "Rédige un email HTML de confirmation pour ADSolar. Utilise les placeholders {{client}}, {{date}}, {{type installation}}, {{devisUrl}}. Ajoute signature ADSolar et contact. Rends JSON avec subject et html."
+            },
+            {
+              "role": "user",
+              "content": "={{JSON.stringify($json.emailContext)}}"
+            }
+          ]
+        },
+        "simplifyOutput": true
+      },
+      "id": "AI_Email_Confirmation",
+      "name": "Email confirmation (AI)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        -160
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{$env.EMAIL_SMTP_USER}}",
+        "toEmail": "={{$json.clientEmail}}",
+        "subject": "={{JSON.parse($json.message?.content || $json.message || '{}').subject || 'Confirmation réception ADSolar'}}",
+        "body": "={{JSON.parse($json.message?.content || $json.message || '{}').html || ''}}",
+        "options": {
+          "senderName": "ADSolar"
+        },
+        "smtpHost": "={{$env.EMAIL_SMTP_HOST}}",
+        "smtpUser": "={{$env.EMAIL_SMTP_USER}}",
+        "smtpPassword": "={{$env.EMAIL_SMTP_PASS}}"
+      },
+      "id": "Email_Confirmation",
+      "name": "Envoyer confirmation",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [
+        2400,
+        -160
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prépare la réponse finale pour la création de chantier\\nconst context = $node['Fusion matériel'].json;\\nreturn [{ json: { conversationId: context.conversationId, reply: 'Projet créé ✅ — fiche chantier enregistrée et mail envoyé.', metadata: { intent: context.intent, materialHighlights: context.materialHighlights || [] } } }];"
+      },
+      "id": "Function_Project_Reply",
+      "name": "Réponse projet",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        2640,
+        -160
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "complete",
+        "model": "gpt-4o-mini",
+        "prompt": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "Déduis le statut chantier à partir de la conversation. Rends JSON avec stageName, reminderDays (entier ou null), emailSummary."
+            },
+            {
+              "role": "user",
+              "content": "={{JSON.stringify($json)}}"
+            }
+          ]
+        },
+        "simplifyOutput": true
+      },
+      "id": "AI_Stage_Analyzer",
+      "name": "Analyser statut (AI)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        960,
+        160
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prépare le contexte de mise à jour de statut\\nconst aiMessage = $json.message?.content ?? $json.message ?? '{}';\\nlet parsed = {};\\ntry { parsed = JSON.parse(aiMessage); } catch (error) { parsed = {}; }\\nconst stageName = parsed.stageName || $node['Assemble intent context'].json.stageName || 'En cours';\\nconst reminderDays = parsed.reminderDays ?? ($node['Assemble intent context'].json.additionalNotes?.includes('rappel') ? 3 : null);\\nreturn [{ json: { ...$node['Assemble intent context'].json, stageName, reminderDays, emailSummary: parsed.emailSummary || '' } }];"
+      },
+      "id": "Function_Stage_Context",
+      "name": "Contexte statut",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        160
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "url": "=https://api.notion.com/v1/databases/{{$env.NOTION_DB_ID}}/query",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.NOTION_TOKEN}}"
+            },
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParametersJson": "={{JSON.stringify({ filter: { property: 'Conversation ID', rich_text: { equals: $json.conversationId || '' } } })}}",
+        "options": {
+          "response": {
+            "responseFormat": "json"
+          }
+        }
+      },
+      "id": "HTTP_Notion_Find_Update",
+      "name": "Trouver chantier statut",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        1440,
+        160
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Compose les propriétés de statut à envoyer à Notion\\nconst search = $json.data || $json.results || $json;\\nconst firstResult = Array.isArray(search?.results) ? search.results[0] : undefined;\\nconst properties = {\\n  'Statut': { select: { name: $node['Contexte statut'].json.stageName || 'En cours' } }\\n};\\nreturn [{ json: { ...$node['Contexte statut'].json, notionPageId: firstResult?.id || null, notionUpdateProperties: properties } }];"
+      },
+      "id": "Function_Stage_Update",
+      "name": "Préparer mise à jour",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1680,
+        160
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "url": "=https://api.notion.com/v1/pages/{{$json.notionPageId}}",
+        "method": "PATCH",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.NOTION_TOKEN}}"
+            },
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParametersJson": "={{JSON.stringify({ properties: $json.notionUpdateProperties })}}",
+        "options": {
+          "response": {
+            "responseFormat": "json"
+          }
+        }
+      },
+      "id": "HTTP_Notion_Update_Stage",
+      "name": "Mettre à jour statut",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        1920,
+        160
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.stageName === 'Pose planifiée'}}"
+            }
+          ]
+        }
+      },
+      "id": "IF_Pose",
+      "name": "Pose planifiée?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        160
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "options": {
+          "unit": "days"
+        },
+        "amount": "={{$json.reminderDays || 3}}"
+      },
+      "id": "Wait_Reminder",
+      "name": "Attendre rappel",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        2400,
+        40
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "complete",
+        "model": "gpt-4o-mini",
+        "prompt": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "Rédige un email HTML de rappel pour une pose planifiée sous 3 jours. Utilise {{client}} et {{date}}. Rends JSON avec subject et html."
+            },
+            {
+              "role": "user",
+              "content": "={{JSON.stringify({ client: $json.clientName, date: $json.reminderDate || '' })}}"
+            }
+          ]
+        },
+        "simplifyOutput": true
+      },
+      "id": "AI_Reminder_Email",
+      "name": "Email rappel (AI)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        2640,
+        40
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{$env.EMAIL_SMTP_USER}}",
+        "toEmail": "={{$json.clientEmail}}",
+        "subject": "={{JSON.parse($json.message?.content || $json.message || '{}').subject || 'Rappel pose ADSolar'}}",
+        "body": "={{JSON.parse($json.message?.content || $json.message || '{}').html || ''}}",
+        "smtpHost": "={{$env.EMAIL_SMTP_HOST}}",
+        "smtpUser": "={{$env.EMAIL_SMTP_USER}}",
+        "smtpPassword": "={{$env.EMAIL_SMTP_PASS}}",
+        "options": {
+          "senderName": "ADSolar"
+        }
+      },
+      "id": "Email_Reminder",
+      "name": "Envoyer rappel",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [
+        2880,
+        40
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Réponse pour mise à jour de statut\\nconst context = $node['Contexte statut'].json;\\nreturn [{ json: { conversationId: context.conversationId, reply: `Statut du chantier mis à jour à ${context.stageName}.` } }];"
+      },
+      "id": "Function_Stage_Reply",
+      "name": "Réponse statut",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        2400,
+        260
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "complete",
+        "model": "gpt-4o-mini",
+        "prompt": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "Analyse la demande d'ajout de type d'installation et renvoie du JSON avec typeInstallation, produits (array {name, quantity})."
+            },
+            {
+              "role": "user",
+              "content": "={{JSON.stringify($json)}}"
+            }
+          ]
+        },
+        "simplifyOutput": true
+      },
+      "id": "AI_Installation_Type",
+      "name": "Type installation (AI)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        960,
+        360
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Ajoute une ligne dans materiel.csv pour le nouveau type\\nconst fs = require('fs');\\nconst path = require('path');\\nconst aiMessage = $json.message?.content ?? $json.message ?? '{}';\\nlet parsed = {};\\ntry { parsed = JSON.parse(aiMessage); } catch (error) { parsed = {}; }\\nconst typeName = parsed.typeInstallation || 'Installation personnalisée';\\nconst produits = Array.isArray(parsed.produits || parsed.products) ? parsed.produits || parsed.products : [];\\nconst csvPath = path.join(process.cwd(), 'materiel.csv');\\nlet lines = [];\\ntry { lines = fs.readFileSync(csvPath, 'utf8').split(/\\r?\\n/); } catch (error) { lines = ['TypeInstallation,Produit,Quantité']; }\\nconst header = lines[0] || 'TypeInstallation,Produit,Quantité';\\nconst records = produits.length ? produits : [{ name: 'Kit standard', quantity: '1' }];\\nfor (const record of records) {\\n  const produit = record.name || record.produit || 'Produit';\\n  const quantity = record.quantity || record.quantite || '1';\\n  lines.push(`${typeName},${produit},${quantity}`);\\n}\\nfs.writeFileSync(csvPath, lines.filter(Boolean).join('\\n'));\\nreturn [{ json: { ...$node['Assemble intent context'].json, newInstallationType: typeName } }];"
+      },
+      "id": "Function_Add_Installation",
+      "name": "Ajouter installation",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        360
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Réponse pour ajout de type d'installation\\nconst typeName = $json.newInstallationType || 'nouveau type';\\nreturn [{ json: { conversationId: $json.conversationId, reply: `Nouveau type d'installation ajouté: ${typeName}.` } }];"
+      },
+      "id": "Function_Installation_Reply",
+      "name": "Réponse installation",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1440,
+        360
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "complete",
+        "model": "gpt-4o-mini",
+        "prompt": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "Analyse l'ajout de produit stock et renvoie JSON avec productName, quantity, supplier, notes."
+            },
+            {
+              "role": "user",
+              "content": "={{JSON.stringify($json)}}"
+            }
+          ]
+        },
+        "simplifyOutput": true
+      },
+      "id": "AI_Product_Analyzer",
+      "name": "Produit stock (AI)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        960,
+        520
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Met à jour le fichier stock.csv avec le produit\\nconst fs = require('fs');\\nconst path = require('path');\\nconst aiMessage = $json.message?.content ?? $json.message ?? '{}';\\nlet parsed = {};\\ntry { parsed = JSON.parse(aiMessage); } catch (error) { parsed = {}; }\\nconst productName = parsed.productName || 'Produit';\\nconst quantity = parsed.quantity || '0';\\nconst supplier = parsed.supplier || 'Fournisseur';\\nconst csvPath = path.join(process.cwd(), 'stock.csv');\\nlet lines = [];\\ntry { lines = fs.readFileSync(csvPath, 'utf8').split(/\\r?\\n/); } catch (error) { lines = ['Produit,Quantité,Fournisseur']; }\\nconst header = lines[0] || 'Produit,Quantité,Fournisseur';\\nconst entries = lines.slice(1).filter(Boolean).map(line => line.split(','));\\nlet updated = false;\\nfor (let i = 0; i < entries.length; i++) {\\n  if ((entries[i][0] || '').toLowerCase() === productName.toLowerCase()) {\\n    entries[i] = [productName, String(quantity), supplier];\\n    updated = true;\\n  }\\n}\\nif (!updated) {\\n  entries.push([productName, String(quantity), supplier]);\\n}\\nconst output = [header, ...entries.map(row => row.join(','))].join('\\n');\\nfs.writeFileSync(csvPath, output);\\nreturn [{ json: { ...$node['Assemble intent context'].json, productName, quantity, supplier } }];"
+      },
+      "id": "Function_Update_Stock",
+      "name": "Mettre à jour stock",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        520
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Réponse pour ajout de produit\\nreturn [{ json: { conversationId: $json.conversationId, reply: `Produit ${$json.productName} ajouté au stock (quantité ${$json.quantity}).` } }];"
+      },
+      "id": "Function_Product_Reply",
+      "name": "Réponse produit",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1440,
+        520
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "complete",
+        "model": "gpt-4o-mini",
+        "prompt": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "Prépare la stratégie de commande mensuelle. Retourne JSON avec planningNotes et période (AAAA-MM)."
+            },
+            {
+              "role": "user",
+              "content": "={{JSON.stringify($json)}}"
+            }
+          ]
+        },
+        "simplifyOutput": true
+      },
+      "id": "AI_Purchase_Strategy",
+      "name": "Stratégie commande (AI)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        960,
+        700
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "url": "=https://api.notion.com/v1/databases/{{$env.NOTION_DB_ID}}/query",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.NOTION_TOKEN}}"
+            },
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParametersJson": "={{JSON.stringify({ filter: { property: 'Statut', select: { equals: 'Préparation' } } })}}",
+        "options": {
+          "response": {
+            "responseFormat": "json"
+          }
+        }
+      },
+      "id": "HTTP_Notion_Upcoming",
+      "name": "Lister chantiers",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        700
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Agrège les matériels nécessaires depuis Notion\\nconst notionData = $json.data || $json.results || $json;\\nconst items = Array.isArray(notionData?.results) ? notionData.results : [];\\nconst materials = {};\\nfor (const page of items) {\\n  const materialProp = page.properties?.['Matériel à prévoir'];\\n  const text = materialProp?.rich_text?.map(t => t.plain_text || '').join('\\n') || '';\\n  const lines = text.split(/\\r?\\n/).map(line => line.trim()).filter(Boolean);\\n  for (const line of lines) {\\n    const match = line.match(/^(.*) x(\\d+)/i);\\n    if (match) {\\n      const name = match[1].trim();\\n      const qty = parseInt(match[2], 10) || 1;\\n      materials[name] = (materials[name] || 0) + qty;\\n    }\\n  }\\n}\\nconst strategyNode = $node['Stratégie commande (AI)'].json || {};\\nconst rawStrategy = strategyNode.message?.content ?? strategyNode.message ?? '{}';\\nlet strategy = {};\\ntry { strategy = JSON.parse(rawStrategy); } catch (error) { strategy = {}; }\\nconst base = $node['Assemble intent context'].json || {};\\nreturn [{ json: { ...base, planningNotes: strategy.planningNotes || '', periode: strategy.periode || '', aggregatedMaterials: materials, strategyDetails: strategy } }];"
+      },
+      "id": "Function_Aggregate_Materials",
+      "name": "Agrégation matériel",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1440,
+        700
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Compare le stock existant et calcule les manques\\nconst fs = require('fs');\\nconst path = require('path');\\nconst stockPath = path.join(process.cwd(), 'stock.csv');\\nlet stock = {};\\ntry {\\n  const raw = fs.readFileSync(stockPath, 'utf8');\\n  const lines = raw.split(/\\r?\\n/).filter(Boolean);\\n  lines.shift();\\n  for (const line of lines) {\\n    const [product, quantity] = line.split(',');\\n    stock[product.trim()] = parseInt(quantity, 10) || 0;\\n  }\\n} catch (error) {\\n  stock = {};\\n}\\nconst materials = $json.aggregatedMaterials || {};\\nconst shortages = [];\\nfor (const [name, required] of Object.entries(materials)) {\\n  const available = stock[name] || 0;\\n  if (available < required) {\\n    shortages.push({ product: name, required, available, missing: required - available });\\n  }\\n}\\nreturn [{ json: { ...$json, stock, shortages } }];"
+      },
+      "id": "Function_Compare_Stock",
+      "name": "Comparer stock",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1680,
+        700
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Construit un CSV à partir des manques\\nconst shortages = $json.shortages || [];\\nlet csv = 'Produit,Quantité manquante,Disponible,Requis';\\nfor (const shortage of shortages) {\\n  csv += `\\n${shortage.product},${shortage.missing},${shortage.available},${shortage.required}`;\\n}\\nreturn [{ json: { ...$json, purchaseCsv: csv } }];"
+      },
+      "id": "Function_Build_CSV",
+      "name": "Préparer CSV",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1920,
+        700
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "complete",
+        "model": "gpt-4o-mini",
+        "prompt": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "Rédige un email interne pour l'équipe achats avec résumé de la commande. Retour JSON avec subject et html."
+            },
+            {
+              "role": "user",
+              "content": "={{JSON.stringify({ shortages: $json.shortages, planningNotes: $json.planningNotes, periode: $json.periode })}}"
+            }
+          ]
+        },
+        "simplifyOutput": true
+      },
+      "id": "AI_Purchase_Email",
+      "name": "Email achats (AI)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        700
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{$env.EMAIL_SMTP_USER}}",
+        "toEmail": "achats@adsolar.fr",
+        "subject": "={{JSON.parse($node[\"Email achats (AI)\"].json.message?.content || $node[\"Email achats (AI)\"].json.message || '{}').subject || 'Commande mensuelle ADSolar'}}",
+        "body": "={{JSON.parse($node[\"Email achats (AI)\"].json.message?.content || $node[\"Email achats (AI)\"].json.message || '{}').html || ''}}",
+        "options": {
+          "attachments": [
+            {
+              "binaryPropertyName": "purchaseCsv",
+              "fileName": "commande-adsolar.csv"
+            }
+          ],
+          "senderName": "ADSolar"
+        },
+        "smtpHost": "={{$env.EMAIL_SMTP_HOST}}",
+        "smtpUser": "={{$env.EMAIL_SMTP_USER}}",
+        "smtpPassword": "={{$env.EMAIL_SMTP_PASS}}"
+      },
+      "id": "Email_Purchase",
+      "name": "Envoyer commande",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [
+        2400,
+        700
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Convertit le CSV texte en binaire pour l'envoi\\nconst Buffer = require('buffer').Buffer;\\nconst csvSource = $node['Préparer CSV'].json || {};\\nconst csv = csvSource.purchaseCsv || $json.purchaseCsv || 'Produit,Quantité manquante,Disponible,Requis';\\nreturn [{ json: { ...csvSource, ...$json }, binary: { purchaseCsv: { data: Buffer.from(csv, 'utf8').toString('base64'), mimeType: 'text/csv' } } }];"
+      },
+      "id": "Function_Attach_CSV",
+      "name": "Joindre CSV",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        820
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Réponse pour la génération de commande\\nreturn [{ json: { conversationId: $json.conversationId, reply: 'Liste de commande mensuelle générée et envoyée.' } }];"
+      },
+      "id": "Function_Purchase_Reply",
+      "name": "Réponse commande",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        2640,
+        700
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Réponse d'aide par défaut\\nreturn [{ json: { conversationId: $json.conversationId, reply: 'Je peux créer un chantier, mettre à jour une étape ou générer une commande. Que souhaitez-vous faire ?' } }];"
+      },
+      "id": "Function_Help",
+      "name": "Réponse help",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        960,
+        900
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Construit la payload de callback chat\\nreturn [{ json: { conversationId: $json.conversationId, reply: $json.reply, metadata: $json.metadata || {} } }];"
+      },
+      "id": "Function_Build_Callback",
+      "name": "Build callback payload",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        2960,
+        160
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Signe la réponse avec HMAC SHA-256\\nconst crypto = require('crypto');\\nconst secret = String($env.SHARED_SECRET || '');\\nconst body = JSON.stringify($json);\\nconst signature = secret ? crypto.createHmac('sha256', secret).update(body).digest('hex') : '';\\nreturn [{ json: { body, signature } }];"
+      },
+      "id": "Function_Sign_Callback",
+      "name": "Sign (HMAC)",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        3200,
+        160
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "url": "={{$env.NEXT_WEBHOOK_URL}}",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-ADSolar-Signature",
+              "value": "={{$json.signature}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParametersJson": "={{$json.body}}"
+      },
+      "id": "HTTP_Callback",
+      "name": "HTTP callback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        3440,
+        160
+      ],
+      "settings": {}
+    },
+    {
+      "parameters": {
+        "responseMode": "onReceived",
+        "responseCode": 202,
+        "responseData": "json",
+        "responseBody": "={\"status\":\"accepted\"}"
+      },
+      "id": "Respond_Accepted",
+      "name": "Respond 202",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        3680,
+        160
+      ],
+      "settings": {}
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify HMAC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify HMAC": {
+      "main": [
+        [
+          {
+            "node": "Signature valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signature valid?": {
+      "main": [
+        [
+          {
+            "node": "Normalize conversation (AI)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Unauthorized",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize conversation (AI)": {
+      "main": [
+        [
+          {
+            "node": "Adopt normalized context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Adopt normalized context": {
+      "main": [
+        [
+          {
+            "node": "Detect intent (AI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect intent (AI)": {
+      "main": [
+        [
+          {
+            "node": "Assemble intent context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble intent context": {
+      "main": [
+        [
+          {
+            "node": "Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Intent": {
+      "main": [
+        [
+          {
+            "node": "Plan chantier (AI)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Analyser statut (AI)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Type installation (AI)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Produit stock (AI)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stratégie commande (AI)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Réponse help",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan chantier (AI)": {
+      "main": [
+        [
+          {
+            "node": "Préparer données chantier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer données chantier": {
+      "main": [
+        [
+          {
+            "node": "Rechercher chantier",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Charger matériel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rechercher chantier": {
+      "main": [
+        [
+          {
+            "node": "Préparer requête Notion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer requête Notion": {
+      "main": [
+        [
+          {
+            "node": "Enregistrer chantier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Charger matériel": {
+      "main": [
+        [
+          {
+            "node": "Formatter matériel (AI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatter matériel (AI)": {
+      "main": [
+        [
+          {
+            "node": "Fusion matériel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fusion matériel": {
+      "main": [
+        [
+          {
+            "node": "Email confirmation (AI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email confirmation (AI)": {
+      "main": [
+        [
+          {
+            "node": "Envoyer confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Envoyer confirmation": {
+      "main": [
+        [
+          {
+            "node": "Réponse projet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyser statut (AI)": {
+      "main": [
+        [
+          {
+            "node": "Contexte statut",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contexte statut": {
+      "main": [
+        [
+          {
+            "node": "Trouver chantier statut",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trouver chantier statut": {
+      "main": [
+        [
+          {
+            "node": "Préparer mise à jour",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer mise à jour": {
+      "main": [
+        [
+          {
+            "node": "Mettre à jour statut",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mettre à jour statut": {
+      "main": [
+        [
+          {
+            "node": "Pose planifiée?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pose planifiée?": {
+      "main": [
+        [
+          {
+            "node": "Attendre rappel",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Réponse statut",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attendre rappel": {
+      "main": [
+        [
+          {
+            "node": "Email rappel (AI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email rappel (AI)": {
+      "main": [
+        [
+          {
+            "node": "Envoyer rappel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Envoyer rappel": {
+      "main": [
+        [
+          {
+            "node": "Réponse statut",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Type installation (AI)": {
+      "main": [
+        [
+          {
+            "node": "Ajouter installation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ajouter installation": {
+      "main": [
+        [
+          {
+            "node": "Réponse installation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Produit stock (AI)": {
+      "main": [
+        [
+          {
+            "node": "Mettre à jour stock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mettre à jour stock": {
+      "main": [
+        [
+          {
+            "node": "Réponse produit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stratégie commande (AI)": {
+      "main": [
+        [
+          {
+            "node": "Lister chantiers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lister chantiers": {
+      "main": [
+        [
+          {
+            "node": "Agrégation matériel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agrégation matériel": {
+      "main": [
+        [
+          {
+            "node": "Comparer stock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Comparer stock": {
+      "main": [
+        [
+          {
+            "node": "Préparer CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer CSV": {
+      "main": [
+        [
+          {
+            "node": "Joindre CSV",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Email achats (AI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Joindre CSV": {
+      "main": [
+        [
+          {
+            "node": "Envoyer commande",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Envoyer commande": {
+      "main": [
+        [
+          {
+            "node": "Réponse commande",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Réponse projet": {
+      "main": [
+        [
+          {
+            "node": "Build callback payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Réponse statut": {
+      "main": [
+        [
+          {
+            "node": "Build callback payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Réponse installation": {
+      "main": [
+        [
+          {
+            "node": "Build callback payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Réponse produit": {
+      "main": [
+        [
+          {
+            "node": "Build callback payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Réponse commande": {
+      "main": [
+        [
+          {
+            "node": "Build callback payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Réponse help": {
+      "main": [
+        [
+          {
+            "node": "Build callback payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build callback payload": {
+      "main": [
+        [
+          {
+            "node": "Sign (HMAC)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign (HMAC)": {
+      "main": [
+        [
+          {
+            "node": "HTTP callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP callback": {
+      "main": [
+        [
+          {
+            "node": "Respond 202",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
