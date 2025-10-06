@@ -43,10 +43,8 @@ export function ChatClient({ initialMessages, initialConversationId }: ChatClien
         window.localStorage.setItem('conversationId', resolvedId);
       }
 
-      if (initialConversationId && resolvedId !== initialConversationId) {
-        const secureAttribute = window.location.protocol === 'https:' ? '; Secure' : '';
-        document.cookie = `conversationId=${resolvedId}; path=/; max-age=${60 * 60 * 24 * 30}; SameSite=Lax${secureAttribute}`;
-      }
+      const secureAttribute = window.location.protocol === 'https:' ? '; Secure' : '';
+      document.cookie = `conversationId=${resolvedId}; path=/; max-age=${60 * 60 * 24 * 30}; SameSite=Lax${secureAttribute}`;
 
       if (!active) return;
       setConversationId(resolvedId);
